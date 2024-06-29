@@ -9,12 +9,16 @@ from pydantic import BaseModel
 from skyvern import analytics
 from skyvern.exceptions import StepNotFound
 from skyvern.forge import app
+from skyvern.forge.prompts import prompt_engine
+from skyvern.forge.sdk.api.llm.exceptions import LLMProviderError
 from skyvern.forge.sdk.artifact.models import Artifact, ArtifactType
 from skyvern.forge.sdk.core import skyvern_context
 from skyvern.forge.sdk.core.permissions.permission_checker_factory import PermissionCheckerFactory
 from skyvern.forge.sdk.core.security import generate_skyvern_signature
 from skyvern.forge.sdk.executor.factory import AsyncExecutorFactory
 from skyvern.forge.sdk.models import Organization, Step
+from skyvern.forge.sdk.schemas.organizations import OrganizationUpdate
+from skyvern.forge.sdk.schemas.task_generations import GenerateTaskRequest, TaskGeneration, TaskGenerationBase
 from skyvern.forge.sdk.schemas.tasks import (
     CreateTaskResponse,
     ProxyLocation,
@@ -195,7 +199,7 @@ async def execute_agent_task_step(
             )
     step, _, _ = await app.agent.execute_step(current_org, task, step)
     return Response(
-        content=step.model_dump_json() if step else "",
+        content=step.model_dump_json(exclude_none=True) if step else "",
         status_code=200,
         media_type="application/json",
     )
@@ -275,6 +279,22 @@ async def get_task(
         recording_url=recording_url,
         failure_reason=failure_reason,
     )
+
+
+@base_router.post("/tasks/{task_id}/cancel")
+@base_router.post("/tasks/{task_id}/cancel/", include_in_schema=False)
+async def cancel_task(
+    task_id: str,
+    current_org: Organization = Depends(org_auth_service.get_current_org),
+) -> None:
+    analytics.capture("skyvern-oss-agent-task-get")
+    task_obj = await app.DATABASE.get_task(task_id, organization_id=current_org.organization_id)
+    if not task_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task not found {task_id}",
+        )
+    await app.agent.update_task(task_obj, status=TaskStatus.canceled)
 
 
 @base_router.post(
@@ -402,7 +422,7 @@ async def get_agent_task_steps(
     """
     analytics.capture("skyvern-oss-agent-task-steps-get")
     steps = await app.DATABASE.get_task_steps(task_id, organization_id=current_org.organization_id)
-    return ORJSONResponse([step.model_dump() for step in steps])
+    return ORJSONResponse([step.model_dump(exclude_none=True) for step in steps])
 
 
 @base_router.get(
@@ -433,7 +453,7 @@ async def get_agent_task_step_artifacts(
         step_id,
         organization_id=current_org.organization_id,
     )
-    if SettingsManager.get_settings().ENV != "local":
+    if SettingsManager.get_settings().ENV != "local" or SettingsManager.get_settings().GENERATE_PRESIGNED_URLS:
         signed_urls = await app.ARTIFACT_MANAGER.get_share_links(artifacts)
         if signed_urls:
             for i, artifact in enumerate(artifacts):
@@ -533,7 +553,7 @@ async def get_workflow_run(
 ) -> WorkflowRunStatusResponse:
     analytics.capture("skyvern-oss-agent-workflow-run-get")
     return await app.WORKFLOW_SERVICE.build_workflow_run_status_response(
-        workflow_id=workflow_id,
+        workflow_permanent_id=workflow_id,
         workflow_run_id=workflow_run_id,
         organization_id=current_org.organization_id,
     )
@@ -634,16 +654,27 @@ async def delete_workflow(
 async def get_workflows(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1),
+    only_saved_tasks: bool = Query(False),
+    only_workflows: bool = Query(False),
     current_org: Organization = Depends(org_auth_service.get_current_org),
 ) -> list[Workflow]:
     """
     Get all workflows with the latest version for the organization.
     """
     analytics.capture("skyvern-oss-agent-workflows-get")
+
+    if only_saved_tasks and only_workflows:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="only_saved_tasks and only_workflows cannot be used together",
+        )
+
     return await app.WORKFLOW_SERVICE.get_workflows_by_organization_id(
         organization_id=current_org.organization_id,
         page=page,
         page_size=page_size,
+        only_saved_tasks=only_saved_tasks,
+        only_workflows=only_workflows,
     )
 
 
@@ -659,4 +690,49 @@ async def get_workflow(
         workflow_permanent_id=workflow_permanent_id,
         organization_id=current_org.organization_id,
         version=version,
+    )
+
+
+@base_router.post("/generate/task", include_in_schema=False)
+@base_router.post("/generate/task/")
+async def generate_task(
+    data: GenerateTaskRequest,
+    current_org: Organization = Depends(org_auth_service.get_current_org),
+) -> TaskGeneration:
+    llm_prompt = prompt_engine.load_prompt("generate-task", user_prompt=data.prompt)
+    try:
+        llm_response = await app.LLM_API_HANDLER(prompt=llm_prompt)
+        parsed_task_generation_obj = TaskGenerationBase.model_validate(llm_response)
+
+        # generate a TaskGenerationModel
+        task_generation = await app.DATABASE.create_task_generation(
+            organization_id=current_org.organization_id,
+            user_prompt=data.prompt,
+            url=parsed_task_generation_obj.url,
+            navigation_goal=parsed_task_generation_obj.navigation_goal,
+            navigation_payload=parsed_task_generation_obj.navigation_payload,
+            data_extraction_goal=parsed_task_generation_obj.data_extraction_goal,
+            extracted_information_schema=parsed_task_generation_obj.extracted_information_schema,
+            llm=SettingsManager.get_settings().LLM_KEY,
+            llm_prompt=llm_prompt,
+            llm_response=str(llm_response),
+        )
+        return task_generation
+    except LLMProviderError:
+        LOG.error("Failed to generate task", exc_info=True)
+        raise HTTPException(status_code=400, detail="Failed to generate task. Please try again later.")
+
+
+@base_router.put("/organizations/", include_in_schema=False)
+@base_router.put("/organizations")
+async def update_organization(
+    org_update: OrganizationUpdate,
+    current_org: Organization = Depends(org_auth_service.get_current_org),
+) -> Organization:
+    return await app.DATABASE.update_organization(
+        current_org.organization_id,
+        organization_name=org_update.organization_name,
+        webhook_callback_url=org_update.webhook_callback_url,
+        max_steps_per_run=org_update.max_steps_per_run,
+        max_retries_per_step=org_update.max_retries_per_step,
     )

@@ -151,18 +151,29 @@ class WorkflowRunContext:
                 LOG.error(f"URL parameter {parameter.url_parameter_key} not found or has no value")
                 raise ValueError("URL parameter for Bitwarden login credentials not found or has no value")
 
+            collection_id = None
+            if parameter.bitwarden_collection_id:
+                if self.has_parameter(parameter.bitwarden_collection_id) and self.has_value(
+                    parameter.bitwarden_collection_id
+                ):
+                    collection_id = self.values[parameter.bitwarden_collection_id]
+                else:
+                    collection_id = parameter.bitwarden_collection_id
+
             try:
                 secret_credentials = BitwardenService.get_secret_value_from_url(
                     client_id,
                     client_secret,
                     master_password,
                     url,
+                    collection_id=collection_id,
                 )
                 if secret_credentials:
                     self.secrets[BitwardenConstants.URL] = url
                     self.secrets[BitwardenConstants.CLIENT_SECRET] = client_secret
                     self.secrets[BitwardenConstants.CLIENT_ID] = client_id
                     self.secrets[BitwardenConstants.MASTER_PASSWORD] = master_password
+                    self.secrets[BitwardenConstants.BW_COLLECTION_ID] = parameter.bitwarden_collection_id
 
                     random_secret_id = self.generate_random_secret_id()
                     # username secret
@@ -181,7 +192,6 @@ class WorkflowRunContext:
                         "totp": totp_secret_id,
                     }
             except BitwardenBaseError as e:
-                BitwardenService.logout()
                 LOG.error(f"Failed to get secret from Bitwarden. Error: {e}")
                 raise e
         elif isinstance(parameter, ContextParameter):
@@ -217,7 +227,7 @@ class WorkflowRunContext:
         self, parameter: OutputParameter, value: dict[str, Any] | list | str | None
     ) -> None:
         if parameter.key in self.values:
-            LOG.error(f"Output parameter {parameter.output_parameter_id} already has a registered value")
+            LOG.warning(f"Output parameter {parameter.output_parameter_id} already has a registered value")
             return
 
         self.values[parameter.key] = value

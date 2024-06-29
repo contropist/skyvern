@@ -1,38 +1,44 @@
 import { getClient } from "@/api/AxiosClient";
 import { Status, TaskApiResponse } from "@/api/types";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useParams } from "react-router-dom";
 import { StatusBadge } from "@/components/StatusBadge";
-import { basicTimeFormat } from "@/util/timeFormat";
-import { StepArtifactsLayout } from "./StepArtifactsLayout";
-import { getRecordingURL, getScreenshotURL } from "./artifactUtils";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Input } from "@/components/ui/input";
-import { ZoomableImage } from "@/components/ZoomableImage";
+import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Separator } from "@/components/ui/separator";
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Textarea } from "@/components/ui/textarea";
+import { toast } from "@/components/ui/use-toast";
 import { useCredentialGetter } from "@/hooks/useCredentialGetter";
+import { cn } from "@/util/utils";
+import { ReloadIcon } from "@radix-ui/react-icons";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { NavLink, Outlet, useParams } from "react-router-dom";
 
 function TaskDetails() {
   const { taskId } = useParams();
   const credentialGetter = useCredentialGetter();
+  const queryClient = useQueryClient();
 
   const {
     data: task,
-    isFetching: isTaskFetching,
-    isError: isTaskError,
+    isLoading: taskIsLoading,
+    isError: taskIsError,
     error: taskError,
   } = useQuery<TaskApiResponse>({
-    queryKey: ["task", taskId, "details"],
+    queryKey: ["task", taskId],
     queryFn: async () => {
       const client = await getClient(credentialGetter);
       return client.get(`/tasks/${taskId}`).then((response) => response.data);
@@ -42,178 +48,189 @@ function TaskDetails() {
         query.state.data?.status === Status.Running ||
         query.state.data?.status === Status.Queued
       ) {
-        return 30000;
+        return 10000;
       }
       return false;
     },
     placeholderData: keepPreviousData,
   });
 
-  if (isTaskError) {
+  const cancelTaskMutation = useMutation({
+    mutationFn: async () => {
+      const client = await getClient(credentialGetter);
+      return client
+        .post(`/tasks/${taskId}/cancel`)
+        .then((response) => response.data);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["task", taskId],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["tasks"],
+      });
+      toast({
+        variant: "success",
+        title: "Task Canceled",
+        description: "The task has been successfully canceled.",
+      });
+    },
+    onError: (error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  if (taskIsError) {
     return <div>Error: {taskError?.message}</div>;
   }
 
+  const showExtractedInformation =
+    task?.status === Status.Completed && task.extracted_information !== null;
+  const extractedInformation = showExtractedInformation ? (
+    <div className="flex items-center">
+      <Label className="w-32 shrink-0 text-lg">Extracted Information</Label>
+      <Textarea
+        rows={5}
+        value={JSON.stringify(task.extracted_information, null, 2)}
+        readOnly
+      />
+    </div>
+  ) : null;
+
+  const taskIsRunningOrQueued =
+    task?.status === Status.Running || task?.status === Status.Queued;
+
+  const showFailureReason =
+    task?.status === Status.Failed ||
+    task?.status === Status.Terminated ||
+    task?.status === Status.TimedOut;
+  const failureReason = showFailureReason ? (
+    <div className="flex items-center">
+      <Label className="w-32 shrink-0 text-lg">Failure Reason</Label>
+      <Textarea
+        rows={5}
+        value={JSON.stringify(task.failure_reason, null, 2)}
+        readOnly
+      />
+    </div>
+  ) : null;
+
   return (
-    <div className="flex flex-col gap-8 max-w-6xl mx-auto p-8 pt-0">
-      <div className="flex items-center">
-        <Label className="w-32 shrink-0 text-lg">Task ID</Label>
-        <Input value={taskId} readOnly />
-      </div>
-      <div className="flex items-center">
-        <Label className="w-32 text-lg">Status</Label>
-        {isTaskFetching ? (
-          <Skeleton className="w-32 h-8" />
-        ) : task ? (
-          <StatusBadge status={task?.status} />
-        ) : null}
-      </div>
-      {task?.status === Status.Completed ? (
-        <div className="flex items-center">
-          <Label className="w-32 shrink-0 text-lg">Extracted Information</Label>
-          <Textarea
-            rows={5}
-            value={JSON.stringify(task.extracted_information, null, 2)}
-            readOnly
-          />
-        </div>
-      ) : null}
-      {task?.status === Status.Failed || task?.status === Status.Terminated ? (
-        <div className="flex items-center">
-          <Label className="w-32 shrink-0 text-lg">Failure Reason</Label>
-          <Textarea
-            rows={5}
-            value={JSON.stringify(task.failure_reason)}
-            readOnly
-          />
-        </div>
-      ) : null}
-      {task ? (
-        <Card>
-          <CardHeader className="border-b-2">
-            <CardTitle className="text-xl">Task Artifacts</CardTitle>
-            <CardDescription>
-              Recording and final screenshot of the task
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Tabs defaultValue="recording">
-              <TabsList>
-                <TabsTrigger value="recording">Recording</TabsTrigger>
-                <TabsTrigger value="final-screenshot">
-                  Final Screenshot
-                </TabsTrigger>
-              </TabsList>
-              <TabsContent value="recording">
-                {task.recording_url ? (
-                  <video
-                    width={800}
-                    height={450}
-                    src={getRecordingURL(task)}
-                    controls
-                  />
-                ) : (
-                  <div>No recording available</div>
-                )}
-              </TabsContent>
-              <TabsContent value="final-screenshot">
-                {task ? (
-                  <div className="h-[450px] w-[800px] overflow-hidden">
-                    {task.screenshot_url ? (
-                      <ZoomableImage
-                        src={getScreenshotURL(task)}
-                        alt="screenshot"
-                        className="object-cover w-full h-full"
-                      />
-                    ) : (
-                      <p>No screenshot available</p>
-                    )}
-                  </div>
-                ) : null}
-              </TabsContent>
-            </Tabs>
-          </CardContent>
-        </Card>
-      ) : null}
-      <Card>
-        <CardHeader className="border-b-2">
-          <CardTitle className="text-lg">Steps</CardTitle>
-          <CardDescription>Task Steps and Step Artifacts</CardDescription>
-        </CardHeader>
-        <CardContent className="min-h-96">
-          <StepArtifactsLayout />
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader className="border-b-2">
-          <CardTitle className="text-xl">Parameters</CardTitle>
-          <CardDescription>Task URL and Input Parameters</CardDescription>
-        </CardHeader>
-        <CardContent className="py-8">
-          {task ? (
-            <div className="flex flex-col gap-8">
-              <div className="flex items-center">
-                <Label className="w-40 shrink-0">URL</Label>
-                <Input value={task.request.url} readOnly />
-              </div>
-              <Separator />
-              <div className="flex items-center">
-                <Label className="w-40 shrink-0">Created at</Label>
-                <Input value={basicTimeFormat(task.created_at)} readOnly />
-              </div>
-              <Separator />
-              <div className="flex items-center">
-                <Label className="w-40 shrink-0">Navigation Goal</Label>
-                <Textarea
-                  rows={5}
-                  value={task.request.navigation_goal ?? ""}
-                  readOnly
-                />
-              </div>
-              <Separator />
-              <div className="flex items-center">
-                <Label className="w-40 shrink-0">Navigation Payload</Label>
-                <Textarea
-                  rows={5}
-                  value={
-                    typeof task.request.navigation_payload === "object"
-                      ? JSON.stringify(task.request.navigation_payload, null, 2)
-                      : task.request.navigation_payload
-                  }
-                  readOnly
-                />
-              </div>
-              <Separator />
-              <div className="flex items-center">
-                <Label className="w-40 shrink-0">Data Extraction Goal</Label>
-                <Textarea
-                  rows={5}
-                  value={task.request.data_extraction_goal ?? ""}
-                  readOnly
-                />
-              </div>
-              <div className="flex items-center">
-                <Label className="w-40 shrink-0">
-                  Extracted Information Schema
-                </Label>
-                <Textarea
-                  rows={5}
-                  value={
-                    typeof task.request.extracted_information_schema ===
-                    "object"
-                      ? JSON.stringify(
-                          task.request.extracted_information_schema,
-                          null,
-                          2,
-                        )
-                      : task.request.extracted_information_schema
-                  }
-                  readOnly
-                />
-              </div>
-            </div>
+    <div className="flex flex-col gap-8">
+      <div className="flex justify-between items-center">
+        <div className="flex items-center gap-4">
+          <span className="text-lg">{taskId}</span>
+          {taskIsLoading ? (
+            <Skeleton className="w-28 h-8" />
+          ) : task ? (
+            <StatusBadge status={task?.status} />
           ) : null}
-        </CardContent>
-      </Card>
+        </div>
+        {taskIsRunningOrQueued && (
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button variant="destructive">Cancel</Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Are you sure?</DialogTitle>
+                <DialogDescription>
+                  Are you sure you want to cancel this task?
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <DialogClose asChild>
+                  <Button variant="secondary">Back</Button>
+                </DialogClose>
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    cancelTaskMutation.mutate();
+                  }}
+                  disabled={cancelTaskMutation.isPending}
+                >
+                  {cancelTaskMutation.isPending && (
+                    <ReloadIcon className="mr-2 h-4 w-4 animate-spin" />
+                  )}
+                  Cancel Task
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        )}
+      </div>
+      {taskIsLoading ? (
+        <div className="flex items-center gap-2">
+          <Skeleton className="w-32 h-32" />
+          <Skeleton className="w-full h-32" />
+        </div>
+      ) : (
+        <>
+          {extractedInformation}
+          {failureReason}
+        </>
+      )}
+      <div className="flex justify-center items-center">
+        <div className="inline-flex border rounded bg-muted p-1">
+          <NavLink
+            to="actions"
+            className={({ isActive }) => {
+              return cn(
+                "cursor-pointer px-2 py-1 rounded-md text-muted-foreground",
+                {
+                  "bg-primary-foreground text-foreground": isActive,
+                },
+              );
+            }}
+          >
+            Actions
+          </NavLink>
+          <NavLink
+            to="recording"
+            className={({ isActive }) => {
+              return cn(
+                "cursor-pointer px-2 py-1 rounded-md text-muted-foreground",
+                {
+                  "bg-primary-foreground text-foreground": isActive,
+                },
+              );
+            }}
+          >
+            Recording
+          </NavLink>
+          <NavLink
+            to="parameters"
+            className={({ isActive }) => {
+              return cn(
+                "cursor-pointer px-2 py-1 rounded-md text-muted-foreground",
+                {
+                  "bg-primary-foreground text-foreground": isActive,
+                },
+              );
+            }}
+          >
+            Parameters
+          </NavLink>
+          <NavLink
+            to="diagnostics"
+            className={({ isActive }) => {
+              return cn(
+                "cursor-pointer px-2 py-1 rounded-md text-muted-foreground",
+                {
+                  "bg-primary-foreground text-foreground": isActive,
+                },
+              );
+            }}
+          >
+            Diagnostics
+          </NavLink>
+        </div>
+      </div>
+      <Outlet />
     </div>
   );
 }

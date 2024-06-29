@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal, Union
 
 import filetype
 import structlog
+from email_validator import EmailNotValidError, validate_email
 from pydantic import BaseModel, Field
 
 from skyvern.config import settings
@@ -29,7 +30,7 @@ from skyvern.forge.sdk.api.llm.api_handler_factory import LLMAPIHandlerFactory
 from skyvern.forge.sdk.schemas.tasks import TaskOutput, TaskStatus
 from skyvern.forge.sdk.settings_manager import SettingsManager
 from skyvern.forge.sdk.workflow.context_manager import WorkflowRunContext
-from skyvern.forge.sdk.workflow.exceptions import InvalidEmailClientConfiguration
+from skyvern.forge.sdk.workflow.exceptions import InvalidEmailClientConfiguration, NoValidEmailRecipient
 from skyvern.forge.sdk.workflow.models.parameter import (
     PARAMETER_TYPE,
     AWSSecretParameter,
@@ -71,6 +72,14 @@ class Block(BaseModel, abc.ABC):
         workflow_run_id: str,
         value: dict[str, Any] | list | str | None = None,
     ) -> None:
+        if workflow_run_context.has_value(self.output_parameter.key):
+            LOG.warning(
+                "Output parameter value already recorded",
+                output_parameter_id=self.output_parameter.output_parameter_id,
+                workflow_run_id=workflow_run_id,
+            )
+            return
+
         await workflow_run_context.register_output_parameter_value_post_execution(
             parameter=self.output_parameter,
             value=value,
@@ -150,6 +159,7 @@ class TaskBlock(Block):
     max_retries: int = 0
     max_steps_per_run: int | None = None
     parameters: list[PARAMETER_TYPE] = []
+    complete_on_download: bool = False
 
     def get_all_parameters(
         self,
@@ -265,6 +275,7 @@ class TaskBlock(Block):
                     task=task,
                     step=step,
                     workflow_run=workflow_run,
+                    complete_on_download=self.complete_on_download,
                 )
             except Exception as e:
                 # Make sure the task is marked as failed in the database before raising the exception
@@ -604,7 +615,7 @@ class DownloadToS3Block(Block):
 
         uri = None
         try:
-            uri = f"s3://{SettingsManager.get_settings().AWS_S3_BUCKET_DOWNLOADS}/{SettingsManager.get_settings().ENV}/{workflow_run_id}/{uuid.uuid4()}"
+            uri = f"s3://{SettingsManager.get_settings().AWS_S3_BUCKET_UPLOADS}/{SettingsManager.get_settings().ENV}/{workflow_run_id}/{uuid.uuid4()}"
             await self._upload_file_to_s3(uri, file_path)
         except Exception as e:
             LOG.error("DownloadToS3Block: Failed to upload file to S3", uri=uri, error=str(e))
@@ -663,9 +674,9 @@ class UploadToS3Block(Block):
             client = self.get_async_aws_client()
             # is the file path a file or a directory?
             if os.path.isdir(self.path):
-                # get all files in the directory, if there are more than 10 files, we will not upload them
+                # get all files in the directory, if there are more than 25 files, we will not upload them
                 files = os.listdir(self.path)
-                if len(files) > 10:
+                if len(files) > 25:
                     raise ValueError("Too many files in the directory, not uploading")
                 for file in files:
                     # if the file is a directory, we will not upload it
@@ -808,12 +819,36 @@ class SendEmailBlock(Block):
         file_path.write(downloaded_bytes)
         return file_path.name
 
+    def get_real_email_recipients(self, workflow_run_context: WorkflowRunContext) -> list[str]:
+        recipients = []
+        for recipient in self.recipients:
+            if workflow_run_context.has_parameter(recipient):
+                maybe_recipient = workflow_run_context.get_value(recipient)
+            else:
+                maybe_recipient = recipient
+
+            # check if maybe_recipient is a valid email address
+            try:
+                validate_email(maybe_recipient)
+                recipients.append(maybe_recipient)
+            except EmailNotValidError as e:
+                LOG.warning(
+                    "SendEmailBlock: Invalid email address",
+                    recipient=maybe_recipient,
+                    reason=str(e),
+                )
+
+        if not recipients:
+            raise NoValidEmailRecipient(recipients=recipients)
+
+        return recipients
+
     async def _build_email_message(
         self, workflow_run_context: WorkflowRunContext, workflow_run_id: str
     ) -> EmailMessage:
         msg = EmailMessage()
         msg["Subject"] = self.subject + f" - Workflow Run ID: {workflow_run_id}"
-        msg["To"] = ", ".join(self.recipients)
+        msg["To"] = ", ".join(self.get_real_email_recipients(workflow_run_context))
         msg["BCC"] = self.sender  # BCC the sender so there is a record of the email being sent
         msg["From"] = self.sender
         if self.body and workflow_run_context.has_parameter(self.body) and workflow_run_context.has_value(self.body):

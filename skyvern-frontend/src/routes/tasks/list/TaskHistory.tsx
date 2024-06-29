@@ -47,6 +47,9 @@ function TaskHistory() {
       params.append("task_status", "completed");
       params.append("task_status", "failed");
       params.append("task_status", "terminated");
+      params.append("task_status", "timed_out");
+      params.append("task_status", "canceled");
+
       return client
         .get("/tasks", {
           params,
@@ -59,15 +62,28 @@ function TaskHistory() {
     return <div>Error: {error?.message}</div>;
   }
 
+  function handleNavigate(event: React.MouseEvent, id: string) {
+    if (event.ctrlKey || event.metaKey) {
+      window.open(
+        window.location.origin + `/tasks/${id}/actions`,
+        "_blank",
+        "noopener,noreferrer",
+      );
+    } else {
+      navigate(`${id}/actions`);
+    }
+  }
+
   return (
     <>
       <div className="rounded-md border">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-1/3">URL</TableHead>
-              <TableHead className="w-1/4">Status</TableHead>
-              <TableHead className="w-1/3">Created At</TableHead>
+              <TableHead className="w-1/4">ID</TableHead>
+              <TableHead className="w-1/4">URL</TableHead>
+              <TableHead className="w-1/6">Status</TableHead>
+              <TableHead className="w-1/4">Created At</TableHead>
               <TableHead className="w-1/12" />
             </TableRow>
           </TableHeader>
@@ -81,28 +97,28 @@ function TaskHistory() {
             ) : (
               tasks?.map((task) => {
                 return (
-                  <TableRow key={task.task_id} className="w-4">
+                  <TableRow key={task.task_id}>
                     <TableCell
-                      className="w-1/3 cursor-pointer"
-                      onClick={() => {
-                        navigate(task.task_id);
-                      }}
+                      className="w-1/4 cursor-pointer"
+                      onClick={(event) => handleNavigate(event, task.task_id)}
+                    >
+                      {task.task_id}
+                    </TableCell>
+                    <TableCell
+                      className="w-1/4 cursor-pointer max-w-64 overflow-hidden whitespace-nowrap overflow-ellipsis"
+                      onClick={(event) => handleNavigate(event, task.task_id)}
                     >
                       {task.request.url}
                     </TableCell>
                     <TableCell
-                      className="w-1/4 cursor-pointer"
-                      onClick={() => {
-                        navigate(task.task_id);
-                      }}
+                      className="w-1/6 cursor-pointer"
+                      onClick={(event) => handleNavigate(event, task.task_id)}
                     >
                       <StatusBadge status={task.status} />
                     </TableCell>
                     <TableCell
-                      className="w-1/3 cursor-pointer"
-                      onClick={() => {
-                        navigate(task.task_id);
-                      }}
+                      className="w-1/4 cursor-pointer"
+                      onClick={(event) => handleNavigate(event, task.task_id)}
                     >
                       {basicTimeFormat(task.created_at)}
                     </TableCell>

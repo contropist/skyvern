@@ -47,7 +47,7 @@ class ScriptNotFound(SkyvernException):
 
 
 class MissingElement(SkyvernException):
-    def __init__(self, xpath: str | None = None, element_id: int | None = None):
+    def __init__(self, xpath: str | None = None, element_id: str | None = None):
         super().__init__(
             f"Found no elements. Might be due to previous actions which removed this element."
             f" xpath={xpath} element_id={element_id}",
@@ -55,7 +55,7 @@ class MissingElement(SkyvernException):
 
 
 class MultipleElementsFound(SkyvernException):
-    def __init__(self, num: int, xpath: str | None = None, element_id: int | None = None):
+    def __init__(self, num: int, xpath: str | None = None, element_id: str | None = None):
         super().__init__(
             f"Found {num} elements. Expected 1. num_elements={num} xpath={xpath} element_id={element_id}",
         )
@@ -165,6 +165,20 @@ class FailedToNavigateToUrl(SkyvernException):
         super().__init__(f"Failed to navigate to url {url}. Error message: {error_message}")
 
 
+class FailedToReloadPage(SkyvernException):
+    def __init__(self, url: str, error_message: str) -> None:
+        self.url = url
+        self.error_message = error_message
+        super().__init__(f"Failed to reload page url {url}. Error message: {error_message}")
+
+
+class FailedToStopLoadingPage(SkyvernException):
+    def __init__(self, url: str, error_message: str) -> None:
+        self.url = url
+        self.error_message = error_message
+        super().__init__(f"Failed to stop loading page url {url}. Error message: {error_message}")
+
+
 class UnexpectedTaskStatus(SkyvernException):
     def __init__(self, task_id: str, status: str) -> None:
         super().__init__(f"Unexpected task status {status} for task {task_id}")
@@ -218,6 +232,11 @@ class FailedToTakeScreenshot(SkyvernException):
         super().__init__(f"Failed to take screenshot. Error message: {error_message}")
 
 
+class EmptyScrapePage(SkyvernException):
+    def __init__(self) -> None:
+        super().__init__("Failed to scrape the page, returned an NONE result")
+
+
 class WorkflowRunContextNotInitialized(SkyvernException):
     def __init__(self, workflow_run_id: str) -> None:
         super().__init__(f"WorkflowRunContext not initialized for workflow run {workflow_run_id}")
@@ -266,4 +285,80 @@ class UnknownElementTreeFormat(SkyvernException):
 
 class StepTerminationError(SkyvernException):
     def __init__(self, step_id: str, reason: str) -> None:
-        super().__init__(f"Step {step_id} cannot be executed and task is terminated. Reason: {reason}")
+        super().__init__(f"Step {step_id} cannot be executed and task is failed. Reason: {reason}")
+
+
+class StepUnableToExecuteError(SkyvernException):
+    def __init__(self, step_id: str, reason: str) -> None:
+        super().__init__(f"Step {step_id} cannot be executed and task execution is stopped. Reason: {reason}")
+
+
+class UnsupportedActionType(SkyvernException):
+    def __init__(self, action_type: str):
+        super().__init__(f"Unsupport action type: {action_type}")
+
+
+class InvalidElementForTextInput(SkyvernException):
+    def __init__(self, element_id: str, tag_name: str):
+        super().__init__(f"The {tag_name} element with id={element_id} doesn't support text input.")
+
+
+class ElementIsNotLabel(SkyvernException):
+    def __init__(self, tag_name: str):
+        super().__init__(f"<{tag_name}> element is not <label>")
+
+
+class MissingElementDict(SkyvernException):
+    def __init__(self, element_id: str) -> None:
+        super().__init__(f"Found no element in the dict. element_id={element_id}")
+
+
+class MissingElementInIframe(SkyvernException):
+    def __init__(self, element_id: str) -> None:
+        super().__init__(f"Found no iframe includes the element. element_id={element_id}")
+
+
+class InputActionOnSelect2Dropdown(SkyvernException):
+    def __init__(self, element_id: str):
+        super().__init__(
+            f"Input action on a select element, please try to use select action on this element. element_id={element_id}"
+        )
+
+
+class FailToSelectByLabel(SkyvernException):
+    def __init__(self, element_id: str):
+        super().__init__(f"Failed to select by label. element_id={element_id}")
+
+
+class FailToSelectByIndex(SkyvernException):
+    def __init__(self, element_id: str):
+        super().__init__(f"Failed to select by index. element_id={element_id}")
+
+
+class OptionIndexOutOfBound(SkyvernException):
+    def __init__(self, element_id: str):
+        super().__init__(f"Option index is out of bound. element_id={element_id}")
+
+
+class FailToSelectByValue(SkyvernException):
+    def __init__(self, element_id: str):
+        super().__init__(f"Failed to select by value. element_id={element_id}")
+
+
+class EmptySelect(SkyvernException):
+    def __init__(self, element_id: str):
+        super().__init__(
+            f"nothing is selected, try to select again. element_id={element_id}",
+        )
+
+
+class TaskAlreadyCanceled(SkyvernHTTPException):
+    def __init__(self, new_status: str, task_id: str):
+        super().__init__(
+            f"Invalid task status transition to {new_status} for {task_id} because task is already canceled"
+        )
+
+
+class InvalidTaskStatusTransition(SkyvernHTTPException):
+    def __init__(self, old_status: str, new_status: str, task_id: str):
+        super().__init__(f"Invalid task status transition from {old_status} to {new_status} for {task_id}")

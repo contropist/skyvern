@@ -3,14 +3,14 @@ import copy
 import json
 from collections import defaultdict
 from enum import StrEnum
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import structlog
-from playwright.async_api import Page
+from playwright.async_api import Frame, Page
 from pydantic import BaseModel
 
 from skyvern.constants import SKYVERN_DIR, SKYVERN_ID_ATTR
-from skyvern.exceptions import UnknownElementTreeFormat
+from skyvern.exceptions import FailedToTakeScreenshot, UnknownElementTreeFormat
 from skyvern.forge.sdk.settings_manager import SettingsManager
 from skyvern.webeye.browser_factory import BrowserState
 
@@ -46,7 +46,6 @@ RESERVED_ATTRIBUTES = {
 
 ELEMENT_NODE_ATTRIBUTES = {
     "id",
-    "interactable",
 }
 
 
@@ -121,8 +120,9 @@ class ScrapedPage(BaseModel):
     """
 
     elements: list[dict]
-    id_to_element_dict: dict[int, dict] = {}
-    id_to_xpath_dict: dict[int, str]
+    id_to_element_dict: dict[str, dict] = {}
+    id_to_frame_dict: dict[str, str] = {}
+    id_to_xpath_dict: dict[str, str]
     element_tree: list[dict]
     element_tree_trimmed: list[dict]
     screenshots: list[bytes]
@@ -144,6 +144,7 @@ async def scrape_website(
     browser_state: BrowserState,
     url: str,
     num_retry: int = 0,
+    scrape_exclude: Callable[[Page, Frame], Awaitable[bool]] | None = None,
 ) -> ScrapedPage:
     """
     ************************************************************************************************
@@ -168,8 +169,8 @@ async def scrape_website(
     """
     try:
         num_retry += 1
-        return await scrape_web_unsafe(browser_state, url)
-    except Exception:
+        return await scrape_web_unsafe(browser_state, url, scrape_exclude)
+    except Exception as e:
         # NOTE: MAX_SCRAPING_RETRIES is set to 0 in both staging and production
         if num_retry > SettingsManager.get_settings().MAX_SCRAPING_RETRIES:
             LOG.error(
@@ -178,28 +179,49 @@ async def scrape_website(
                 url=url,
                 exc_info=True,
             )
-            raise Exception("Scraping failed.")
+            if isinstance(e, FailedToTakeScreenshot):
+                raise e
+            else:
+                raise Exception("Scraping failed.")
         LOG.info("Scraping failed, will retry", num_retry=num_retry, url=url)
         return await scrape_website(
             browser_state,
             url,
             num_retry=num_retry,
+            scrape_exclude=scrape_exclude,
         )
 
 
-async def get_all_visible_text(page: Page) -> str:
+async def get_frame_text(iframe: Frame) -> str:
     """
-    Get all the visible text on the page.
-    :param page: Page instance to get the text from.
-    :return: All the visible text on the page.
+    Get all the visible text in the iframe.
+    :param iframe: Frame instance to get the text from.
+    :return: All the visible text from the iframe.
     """
     js_script = "() => document.body.innerText"
-    return await page.evaluate(js_script)
+
+    try:
+        text = await iframe.evaluate(js_script)
+    except Exception:
+        LOG.warning(
+            "failed to get text from iframe",
+            exc_info=True,
+        )
+        return ""
+
+    for child_frame in iframe.child_frames:
+        if child_frame.is_detached():
+            continue
+
+        text += await get_frame_text(child_frame)
+
+    return text
 
 
 async def scrape_web_unsafe(
     browser_state: BrowserState,
     url: str,
+    scrape_exclude: Callable[[Page, Frame], Awaitable[bool]] | None = None,
 ) -> ScrapedPage:
     """
     Asynchronous function that performs web scraping without any built-in error handling. This function is intended
@@ -249,24 +271,29 @@ async def scrape_web_unsafe(
     await remove_bounding_boxes(page)
     await scroll_to_top(page, drow_boxes=False)
 
-    elements, element_tree = await get_interactable_element_tree(page)
+    elements, element_tree = await get_interactable_element_tree(page, scrape_exclude)
     element_tree = cleanup_elements(copy.deepcopy(element_tree))
 
     _build_element_links(elements)
 
     id_to_xpath_dict = {}
     id_to_element_dict = {}
+    id_to_frame_dict = {}
+
     for element in elements:
         element_id = element["id"]
         # get_interactable_element_tree marks each interactable element with a unique_id attribute
         id_to_xpath_dict[element_id] = f"//*[@{SKYVERN_ID_ATTR}='{element_id}']"
         id_to_element_dict[element_id] = element
+        id_to_frame_dict[element_id] = element["frame"]
 
-    text_content = await get_all_visible_text(page)
+    text_content = await get_frame_text(page.main_frame)
+
     return ScrapedPage(
         elements=elements,
         id_to_xpath_dict=id_to_xpath_dict,
         id_to_element_dict=id_to_element_dict,
+        id_to_frame_dict=id_to_frame_dict,
         element_tree=element_tree,
         element_tree_trimmed=trim_element_tree(copy.deepcopy(element_tree)),
         screenshots=screenshots,
@@ -276,15 +303,83 @@ async def scrape_web_unsafe(
     )
 
 
-async def get_interactable_element_tree(page: Page) -> tuple[list[dict], list[dict]]:
+async def get_select2_options(page: Page) -> list[dict[str, Any]]:
+    await page.evaluate(JS_FUNCTION_DEFS)
+    js_script = "async () => await getSelect2Options()"
+    return await page.evaluate(js_script)
+
+
+async def get_interactable_element_tree_in_frame(
+    frames: list[Frame],
+    elements: list[dict],
+    element_tree: list[dict],
+    scrape_exclude: Callable[[Page, Frame], Awaitable[bool]] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    for frame in frames:
+        if frame.is_detached():
+            continue
+
+        if scrape_exclude is not None and await scrape_exclude(frame.page, frame):
+            continue
+
+        try:
+            frame_element = await frame.frame_element()
+        except Exception:
+            LOG.warning(
+                "Unable to get frame_element",
+                exc_info=True,
+            )
+            continue
+
+        unique_id = await frame_element.get_attribute("unique_id")
+
+        frame_js_script = f"async () => await buildTreeFromBody('{unique_id}', true)"
+
+        await frame.evaluate(JS_FUNCTION_DEFS)
+        frame_elements, frame_element_tree = await frame.evaluate(frame_js_script)
+
+        if len(frame.child_frames) > 0:
+            frame_elements, frame_element_tree = await get_interactable_element_tree_in_frame(
+                frame.child_frames,
+                frame_elements,
+                frame_element_tree,
+                scrape_exclude=scrape_exclude,
+            )
+
+        for element in elements:
+            if element["id"] == unique_id:
+                element["children"] = frame_elements
+
+        for element_tree_item in element_tree:
+            if element_tree_item["id"] == unique_id:
+                element_tree_item["children"] = frame_element_tree
+
+        elements = elements + frame_elements
+
+    return elements, element_tree
+
+
+async def get_interactable_element_tree(
+    page: Page,
+    scrape_exclude: Callable[[Page, Frame], Awaitable[bool]] | None = None,
+) -> tuple[list[dict], list[dict]]:
     """
     Get the element tree of the page, including all the elements that are interactable.
     :param page: Page instance to get the element tree from.
     :return: Tuple containing the element tree and a map of element IDs to elements.
     """
     await page.evaluate(JS_FUNCTION_DEFS)
-    js_script = "() => buildTreeFromBody()"
-    elements, element_tree = await page.evaluate(js_script)
+    main_frame_js_script = "async () => await buildTreeFromBody('main.frame', true)"
+    elements, element_tree = await page.evaluate(main_frame_js_script)
+
+    if len(page.main_frame.child_frames) > 0:
+        elements, element_tree = await get_interactable_element_tree_in_frame(
+            page.main_frame.child_frames,
+            elements,
+            element_tree,
+            scrape_exclude=scrape_exclude,
+        )
+
     return elements, element_tree
 
 
@@ -296,7 +391,7 @@ async def scroll_to_top(page: Page, drow_boxes: bool) -> float:
     :return: Screenshot of the page.
     """
     await page.evaluate(JS_FUNCTION_DEFS)
-    js_script = f"() => scrollToTop({str(drow_boxes).lower()})"
+    js_script = f"async () => await scrollToTop({str(drow_boxes).lower()})"
     scroll_y_px = await page.evaluate(js_script)
     return scroll_y_px
 
@@ -309,7 +404,7 @@ async def scroll_to_next_page(page: Page, drow_boxes: bool) -> bool:
     :return: Screenshot of the page.
     """
     await page.evaluate(JS_FUNCTION_DEFS)
-    js_script = f"() => scrollToNextPage({str(drow_boxes).lower()})"
+    js_script = f"async () => await scrollToNextPage({str(drow_boxes).lower()})"
     scroll_y_px = await page.evaluate(js_script)
     return scroll_y_px
 
@@ -352,13 +447,22 @@ def trim_element_tree(elements: list[dict]) -> list[dict]:
         queue.append(element)
     while queue:
         queue_ele = queue.pop(0)
-        if "attributes" in queue_ele:
+        if "frame" in queue_ele:
+            del queue_ele["frame"]
+
+        if not queue_ele.get("interactable"):
+            del queue_ele["id"]
+
+        if "attributes" in queue_ele and not queue_ele.get("keepAllAttr", False):
             tag_name = queue_ele["tagName"] if "tagName" in queue_ele else ""
             new_attributes = _trimmed_attributes(tag_name, queue_ele["attributes"])
             if new_attributes:
                 queue_ele["attributes"] = new_attributes
             else:
                 del queue_ele["attributes"]
+        # remove the tag, don't need it in the HTML tree
+        del queue_ele["keepAllAttr"]
+
         if "children" in queue_ele:
             queue.extend(queue_ele["children"])
             if not queue_ele["children"]:

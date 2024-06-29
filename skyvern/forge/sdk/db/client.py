@@ -18,6 +18,7 @@ from skyvern.forge.sdk.db.models import (
     OrganizationModel,
     OutputParameterModel,
     StepModel,
+    TaskGenerationModel,
     TaskModel,
     WorkflowModel,
     WorkflowParameterModel,
@@ -42,6 +43,7 @@ from skyvern.forge.sdk.db.utils import (
     convert_to_workflow_run_parameter,
 )
 from skyvern.forge.sdk.models import Organization, OrganizationAuthToken, Step, StepStatus
+from skyvern.forge.sdk.schemas.task_generations import TaskGeneration
 from skyvern.forge.sdk.schemas.tasks import ProxyLocation, Task, TaskStatus
 from skyvern.forge.sdk.workflow.models.parameter import (
     AWSSecretParameter,
@@ -293,6 +295,8 @@ class AgentDB:
         retry_index: int | None = None,
         organization_id: str | None = None,
         incremental_cost: float | None = None,
+        incremental_input_tokens: int | None = None,
+        incremental_output_tokens: int | None = None,
     ) -> Step:
         try:
             async with self.Session() as session:
@@ -307,13 +311,17 @@ class AgentDB:
                     if status is not None:
                         step.status = status
                     if output is not None:
-                        step.output = output.model_dump()
+                        step.output = output.model_dump(exclude_none=True)
                     if is_last is not None:
                         step.is_last = is_last
                     if retry_index is not None:
                         step.retry_index = retry_index
                     if incremental_cost is not None:
                         step.step_cost = incremental_cost + float(step.step_cost or 0)
+                    if incremental_input_tokens is not None:
+                        step.input_token_count = incremental_input_tokens + (step.input_token_count or 0)
+                    if incremental_output_tokens is not None:
+                        step.output_token_count = incremental_output_tokens + (step.output_token_count or 0)
 
                     await session.commit()
                     updated_step = await self.get_step(task_id, step_id, organization_id)
@@ -477,6 +485,32 @@ class AgentDB:
 
         return convert_to_organization(org)
 
+    async def update_organization(
+        self,
+        organization_id: str,
+        organization_name: str | None = None,
+        webhook_callback_url: str | None = None,
+        max_steps_per_run: int | None = None,
+        max_retries_per_step: int | None = None,
+    ) -> Organization:
+        async with self.Session() as session:
+            organization = (
+                await session.scalars(select(OrganizationModel).filter_by(organization_id=organization_id))
+            ).first()
+            if not organization:
+                raise NotFoundError
+            if organization_name:
+                organization.organization_name = organization_name
+            if webhook_callback_url:
+                organization.webhook_callback_url = webhook_callback_url
+            if max_steps_per_run:
+                organization.max_steps_per_run = max_steps_per_run
+            if max_retries_per_step:
+                organization.max_retries_per_step = max_retries_per_step
+            await session.commit()
+            await session.refresh(organization)
+            return Organization.model_validate(organization)
+
     async def get_valid_org_auth_token(
         self,
         organization_id: str,
@@ -490,11 +524,36 @@ class AgentDB:
                         .filter_by(organization_id=organization_id)
                         .filter_by(token_type=token_type)
                         .filter_by(valid=True)
+                        .order_by(OrganizationAuthTokenModel.created_at.desc())
                     )
                 ).first():
                     return convert_to_organization_auth_token(token)
                 else:
                     return None
+        except SQLAlchemyError:
+            LOG.error("SQLAlchemyError", exc_info=True)
+            raise
+        except Exception:
+            LOG.error("UnexpectedError", exc_info=True)
+            raise
+
+    async def get_valid_org_auth_tokens(
+        self,
+        organization_id: str,
+        token_type: OrganizationAuthTokenType,
+    ) -> list[OrganizationAuthToken]:
+        try:
+            async with self.Session() as session:
+                tokens = (
+                    await session.scalars(
+                        select(OrganizationAuthTokenModel)
+                        .filter_by(organization_id=organization_id)
+                        .filter_by(token_type=token_type)
+                        .filter_by(valid=True)
+                        .order_by(OrganizationAuthTokenModel.created_at.desc())
+                    )
+                ).all()
+                return [convert_to_organization_auth_token(token) for token in tokens]
         except SQLAlchemyError:
             LOG.error("SQLAlchemyError", exc_info=True)
             raise
@@ -740,6 +799,7 @@ class AgentDB:
         webhook_callback_url: str | None = None,
         workflow_permanent_id: str | None = None,
         version: int | None = None,
+        is_saved_task: bool = False,
     ) -> Workflow:
         async with self.Session() as session:
             workflow = WorkflowModel(
@@ -749,6 +809,7 @@ class AgentDB:
                 workflow_definition=workflow_definition,
                 proxy_location=proxy_location,
                 webhook_callback_url=webhook_callback_url,
+                is_saved_task=is_saved_task,
             )
             if workflow_permanent_id:
                 workflow.workflow_permanent_id = workflow_permanent_id
@@ -804,6 +865,8 @@ class AgentDB:
         organization_id: str,
         page: int = 1,
         page_size: int = 10,
+        only_saved_tasks: bool = False,
+        only_workflows: bool = False,
     ) -> list[Workflow]:
         """
         Get all workflows with the latest version for the organization.
@@ -827,17 +890,18 @@ class AgentDB:
                     )
                     .subquery()
                 )
+                main_query = select(WorkflowModel).join(
+                    subquery,
+                    (WorkflowModel.organization_id == subquery.c.organization_id)
+                    & (WorkflowModel.workflow_permanent_id == subquery.c.workflow_permanent_id)
+                    & (WorkflowModel.version == subquery.c.max_version),
+                )
+                if only_saved_tasks:
+                    main_query = main_query.where(WorkflowModel.is_saved_task.is_(True))
+                elif only_workflows:
+                    main_query = main_query.where(WorkflowModel.is_saved_task.is_(False))
                 main_query = (
-                    select(WorkflowModel)
-                    .join(
-                        subquery,
-                        (WorkflowModel.organization_id == subquery.c.organization_id)
-                        & (WorkflowModel.workflow_permanent_id == subquery.c.workflow_permanent_id)
-                        & (WorkflowModel.version == subquery.c.max_version),
-                    )
-                    .order_by(WorkflowModel.created_at.desc())  # Example ordering by creation date
-                    .limit(page_size)
-                    .offset(db_page * page_size)
+                    main_query.order_by(WorkflowModel.created_at.desc()).limit(page_size).offset(db_page * page_size)
                 )
                 workflows = (await session.scalars(main_query)).all()
                 return [convert_to_workflow(workflow, self.debug_enabled) for workflow in workflows]
@@ -1018,6 +1082,7 @@ class AgentDB:
         url_parameter_key: str,
         key: str,
         description: str | None = None,
+        bitwarden_collection_id: str | None = None,
     ) -> BitwardenLoginCredentialParameter:
         async with self.Session() as session:
             bitwarden_login_credential_parameter = BitwardenLoginCredentialParameterModel(
@@ -1028,6 +1093,7 @@ class AgentDB:
                 url_parameter_key=url_parameter_key,
                 key=key,
                 description=description,
+                bitwarden_collection_id=bitwarden_collection_id,
             )
             session.add(bitwarden_login_credential_parameter)
             await session.commit()
@@ -1230,3 +1296,34 @@ class AgentDB:
             )
             await session.execute(stmt)
             await session.commit()
+
+    async def create_task_generation(
+        self,
+        organization_id: str,
+        user_prompt: str,
+        url: str | None = None,
+        navigation_goal: str | None = None,
+        navigation_payload: dict[str, Any] | None = None,
+        data_extraction_goal: str | None = None,
+        extracted_information_schema: dict[str, Any] | None = None,
+        llm: str | None = None,
+        llm_prompt: str | None = None,
+        llm_response: str | None = None,
+    ) -> TaskGeneration:
+        async with self.Session() as session:
+            new_task_generation = TaskGenerationModel(
+                organization_id=organization_id,
+                user_prompt=user_prompt,
+                url=url,
+                navigation_goal=navigation_goal,
+                navigation_payload=navigation_payload,
+                data_extraction_goal=data_extraction_goal,
+                extracted_information_schema=extracted_information_schema,
+                llm=llm,
+                llm_prompt=llm_prompt,
+                llm_response=llm_response,
+            )
+            session.add(new_task_generation)
+            await session.commit()
+            await session.refresh(new_task_generation)
+            return TaskGeneration.model_validate(new_task_generation)

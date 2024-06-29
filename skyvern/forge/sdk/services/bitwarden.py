@@ -1,9 +1,11 @@
 import json
 import os
+import re
 import subprocess
 from enum import StrEnum
 
 import structlog
+import tldextract
 
 from skyvern.exceptions import (
     BitwardenListItemsError,
@@ -16,11 +18,17 @@ from skyvern.exceptions import (
 LOG = structlog.get_logger()
 
 
+def is_valid_email(email: str) -> bool:
+    pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    return re.match(pattern, email) is not None
+
+
 class BitwardenConstants(StrEnum):
     CLIENT_ID = "BW_CLIENT_ID"
     CLIENT_SECRET = "BW_CLIENT_SECRET"
     MASTER_PASSWORD = "BW_MASTER_PASSWORD"
     URL = "BW_URL"
+    BW_COLLECTION_ID = "BW_COLLECTION_ID"
 
     USERNAME = "BW_USERNAME"
     PASSWORD = "BW_PASSWORD"
@@ -62,6 +70,7 @@ class BitwardenService:
         client_secret: str,
         master_password: str,
         url: str,
+        collection_id: str | None = None,
     ) -> dict[str, str]:
         """
         Get the secret value from the Bitwarden CLI.
@@ -99,14 +108,6 @@ class BitwardenService:
                     f"Failed to unlock vault. stdout: {unlock_result.stdout} stderr: {unlock_result.stderr}"
                 )
 
-            # This is a part of Bitwarden's client-side telemetry
-            # TODO -- figure out how to disable this telemetry so we never get this error
-            # https://github.com/bitwarden/clients/blob/9d10825dbd891c0f41fe1b4c4dd3ca4171f63be5/libs/common/src/services/api.service.ts#L1473
-            if unlock_result.stderr and "Event post failed" not in unlock_result.stderr:
-                raise BitwardenUnlockError(
-                    f"Failed to unlock vault. stdout: {unlock_result.stdout} stderr: {unlock_result.stderr}"
-                )
-
             # Extract session key
             try:
                 session_key = BitwardenService._extract_session_key(unlock_result.stdout)
@@ -117,15 +118,20 @@ class BitwardenService:
                 raise BitwardenUnlockError("Session key is empty.")
 
             # Step 3: Retrieve the items
+            # Extract the domain from the URL and search for items in Bitwarden with that domain
+            domain = tldextract.extract(url).domain
             list_command = [
                 "bw",
                 "list",
                 "items",
-                "--url",
-                url,
+                "--search",
+                domain,
                 "--session",
                 session_key,
             ]
+            if collection_id:
+                LOG.info("Collection ID is provided, filtering items by collection ID", collection_id=collection_id)
+                list_command.extend(["--collectionid", collection_id])
             items_result = BitwardenService.run_command(list_command)
 
             if items_result.stderr and "Event post failed" not in items_result.stderr:
@@ -138,7 +144,8 @@ class BitwardenService:
                 raise BitwardenListItemsError("Failed to parse items JSON. Output: " + items_result.stdout)
 
             if not items:
-                raise BitwardenListItemsError("No items found in Bitwarden.")
+                collection_id_str = f" in collection with ID: {collection_id}" if collection_id else ""
+                raise BitwardenListItemsError(f"No items found in Bitwarden for URL: {url}{collection_id_str}")
 
             totp_command = ["bw", "get", "totp", url, "--session", session_key]
             totp_result = BitwardenService.run_command(totp_command)
@@ -161,8 +168,21 @@ class BitwardenService:
                 if "login" in item
             ]
 
-            # Todo: Handle multiple credentials, for now just return the last one
-            return credentials[-1] if credentials else {}
+            if len(credentials) == 0:
+                return {}
+
+            if len(credentials) == 1:
+                return credentials[0]
+
+            # Choose multiple credentials according to the defined rule,
+            # if no cred matches the rule, return the first one.
+            # TODO: For now hard code to choose the first valid email username
+            for cred in credentials:
+                if is_valid_email(cred.get(BitwardenConstants.USERNAME, "")):
+                    return cred
+
+            LOG.warning("No credential in Bitwarden matches the rule, returning the frist match")
+            return credentials[0]
         finally:
             # Step 4: Log out
             BitwardenService.logout()

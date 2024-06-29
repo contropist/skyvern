@@ -32,14 +32,27 @@ function QueuedTasks() {
     },
   });
 
+  function handleNavigate(event: React.MouseEvent, id: string) {
+    if (event.ctrlKey || event.metaKey) {
+      window.open(
+        window.location.origin + `/tasks/${id}/actions`,
+        "_blank",
+        "noopener,noreferrer",
+      );
+    } else {
+      navigate(`${id}/actions`);
+    }
+  }
+
   return (
     <div className="rounded-md border">
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className="w-1/3">URL</TableHead>
-            <TableHead className="w-1/3">Status</TableHead>
-            <TableHead className="w-1/3">Created At</TableHead>
+            <TableHead className="w-1/4">ID</TableHead>
+            <TableHead className="w-1/4">URL</TableHead>
+            <TableHead className="w-1/4">Status</TableHead>
+            <TableHead className="w-1/4">Created At</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -53,15 +66,16 @@ function QueuedTasks() {
                 <TableRow
                   key={task.task_id}
                   className="w-4"
-                  onClick={() => {
-                    navigate(task.task_id);
-                  }}
+                  onClick={(event) => handleNavigate(event, task.task_id)}
                 >
-                  <TableCell className="w-1/3">{task.request.url}</TableCell>
-                  <TableCell className="w-1/3">
+                  <TableCell className="w-1/4">{task.task_id}</TableCell>
+                  <TableCell className="w-1/4 max-w-64 overflow-hidden whitespace-nowrap overflow-ellipsis">
+                    {task.request.url}
+                  </TableCell>
+                  <TableCell className="w-1/4">
                     <StatusBadge status={task.status} />
                   </TableCell>
-                  <TableCell className="w-1/3">
+                  <TableCell className="w-1/4">
                     {basicTimeFormat(task.created_at)}
                   </TableCell>
                 </TableRow>

@@ -160,6 +160,7 @@ def convert_to_workflow(workflow_model: WorkflowModel, debug_enabled: bool = Fal
         webhook_callback_url=workflow_model.webhook_callback_url,
         proxy_location=(ProxyLocation(workflow_model.proxy_location) if workflow_model.proxy_location else None),
         version=workflow_model.version,
+        is_saved_task=workflow_model.is_saved_task,
         description=workflow_model.description,
         workflow_definition=WorkflowDefinition.model_validate(workflow_model.workflow_definition),
         created_at=workflow_model.created_at,
@@ -241,6 +242,7 @@ def convert_to_bitwarden_login_credential_parameter(
         LOG.debug(
             "Converting BitwardenLoginCredentialParameterModel to BitwardenLoginCredentialParameter",
             bitwarden_login_credential_parameter_id=bitwarden_login_credential_parameter_model.bitwarden_login_credential_parameter_id,
+            bitwarden_collection_id=bitwarden_login_credential_parameter_model.bitwarden_collection_id,
         )
 
     return BitwardenLoginCredentialParameter(
@@ -251,6 +253,7 @@ def convert_to_bitwarden_login_credential_parameter(
         bitwarden_client_id_aws_secret_key=bitwarden_login_credential_parameter_model.bitwarden_client_id_aws_secret_key,
         bitwarden_client_secret_aws_secret_key=bitwarden_login_credential_parameter_model.bitwarden_client_secret_aws_secret_key,
         bitwarden_master_password_aws_secret_key=bitwarden_login_credential_parameter_model.bitwarden_master_password_aws_secret_key,
+        bitwarden_collection_id=bitwarden_login_credential_parameter_model.bitwarden_collection_id,
         url_parameter_key=bitwarden_login_credential_parameter_model.url_parameter_key,
         created_at=bitwarden_login_credential_parameter_model.created_at,
         modified_at=bitwarden_login_credential_parameter_model.modified_at,

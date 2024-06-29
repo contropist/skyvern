@@ -3,9 +3,10 @@ from datetime import datetime
 from typing import Awaitable, Callable
 
 import structlog
-from fastapi import APIRouter, FastAPI, Response
+from fastapi import APIRouter, FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from starlette.requests import HTTPConnection, Request
 from starlette_context.middleware import RawContextMiddleware
 from starlette_context.plugins.base import Plugin
@@ -14,6 +15,7 @@ from skyvern.exceptions import SkyvernHTTPException
 from skyvern.forge import app as forge_app
 from skyvern.forge.sdk.core import skyvern_context
 from skyvern.forge.sdk.core.skyvern_context import SkyvernContext
+from skyvern.forge.sdk.db.exceptions import NotFoundError
 from skyvern.forge.sdk.routes.agent_protocol import base_router
 from skyvern.forge.sdk.settings_manager import SettingsManager
 from skyvern.scheduler import SCHEDULER
@@ -74,9 +76,17 @@ def get_agent_app(router: APIRouter = base_router) -> FastAPI:
 
         LOG.info("Server startup complete. Skyvern is now online")
 
+    @app.exception_handler(NotFoundError)
+    async def handle_not_found_error(request: Request, exc: NotFoundError) -> Response:
+        return Response(status_code=status.HTTP_404_NOT_FOUND)
+
     @app.exception_handler(SkyvernHTTPException)
     async def handle_skyvern_http_exception(request: Request, exc: SkyvernHTTPException) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
+
+    @app.exception_handler(ValidationError)
+    async def handle_pydantic_validation_error(request: Request, exc: ValidationError) -> JSONResponse:
+        return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
 
     @app.exception_handler(Exception)
     async def unexpected_exception(request: Request, exc: Exception) -> JSONResponse:

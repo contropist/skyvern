@@ -20,15 +20,16 @@ function createEmptyTaskTemplate() {
   return {
     title: "New Template",
     description: "",
+    is_saved_task: true,
     webhook_callback_url: null,
-    proxy_location: "NONE",
+    proxy_location: "RESIDENTIAL",
     workflow_definition: {
       parameters: [
         {
           parameter_type: "workflow",
           workflow_parameter_type: "json",
           key: "navigation_payload",
-          default_value: JSON.stringify({}),
+          default_value: "null",
         },
       ],
       blocks: [
@@ -53,7 +54,9 @@ function SavedTasks() {
     queryKey: ["workflows"],
     queryFn: async () => {
       const client = await getClient(credentialGetter);
-      return client.get("/workflows").then((response) => response.data);
+      return client
+        .get("/workflows?only_saved_tasks=true")
+        .then((response) => response.data);
     },
   });
 

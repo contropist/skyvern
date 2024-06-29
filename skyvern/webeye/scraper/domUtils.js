@@ -216,6 +216,10 @@ function isElementVisible(element) {
   if (element.tagName.toLowerCase() === "option")
     return element.parentElement && isElementVisible(element.parentElement);
 
+  if (element.className.toString().includes("select2-offscreen")) {
+    return false;
+  }
+
   const style = getElementComputedStyle(element);
   if (!style) return true;
   if (style.display === "contents") {
@@ -342,6 +346,10 @@ function isInteractable(element) {
 
   const tagName = element.tagName.toLowerCase();
 
+  if (tagName === "iframe") {
+    return false;
+  }
+
   if (tagName === "a" && element.href) {
     return true;
   }
@@ -410,6 +418,20 @@ const isComboboxDropdown = (element) => {
   return role && haspopup && controls && readonly;
 };
 
+const isSelect2Dropdown = (element) => {
+  return (
+    element.tagName.toLowerCase() === "span" &&
+    element.className.toString().includes("select2-chosen")
+  );
+};
+
+const isSelect2MultiChoice = (element) => {
+  return (
+    element.tagName.toLowerCase() === "input" &&
+    element.className.toString().includes("select2-input")
+  );
+};
+
 const checkParentClass = (className) => {
   const targetParentClasses = ["field", "entry"];
   for (let i = 0; i < targetParentClasses.length; i++) {
@@ -476,12 +498,12 @@ function getElementContext(element) {
   // if the element already has a context, then add it to the list first
   for (var child of element.childNodes) {
     let childContext = "";
-    if (child.nodeType === Node.TEXT_NODE) {
+    if (child.nodeType === Node.TEXT_NODE && isElementVisible(element)) {
       if (!element.hasAttribute("unique_id")) {
-        childContext = child.data.trim();
+        childContext = getVisibleText(child).trim();
       }
     } else if (child.nodeType === Node.ELEMENT_NODE) {
-      if (!child.hasAttribute("unique_id")) {
+      if (!child.hasAttribute("unique_id") && isElementVisible(child)) {
         childContext = getElementContext(child);
       }
     }
@@ -492,13 +514,36 @@ function getElementContext(element) {
   return fullContext.join(";");
 }
 
+function getVisibleText(element) {
+  let visibleText = [];
+
+  function collectVisibleText(node) {
+    if (
+      node.nodeType === Node.TEXT_NODE &&
+      isElementVisible(node.parentElement)
+    ) {
+      const trimmedText = node.data.trim();
+      if (trimmedText.length > 0) {
+        visibleText.push(trimmedText);
+      }
+    } else if (node.nodeType === Node.ELEMENT_NODE && isElementVisible(node)) {
+      for (let child of node.childNodes) {
+        collectVisibleText(child);
+      }
+    }
+  }
+
+  collectVisibleText(element);
+  return visibleText.join(" ");
+}
+
 function getElementContent(element, skipped_element = null) {
   // DFS to get all the text content from all the nodes under the element
   if (skipped_element && element === skipped_element) {
     return "";
   }
 
-  let textContent = element.textContent;
+  let textContent = getVisibleText(element);
   let nodeContent = "";
   // if element has children, then build a list of text and join with a semicolon
   if (element.childNodes.length > 0) {
@@ -507,8 +552,10 @@ function getElementContent(element, skipped_element = null) {
     for (var child of element.childNodes) {
       let childText = "";
       if (child.nodeType === Node.TEXT_NODE) {
-        childText = child.data.trim();
-        nodeTextContentList.push(childText);
+        childText = getVisibleText(child).trim();
+        if (childText.length > 0) {
+          nodeTextContentList.push(childText);
+        }
       } else if (child.nodeType === Node.ELEMENT_NODE) {
         // childText = child.textContent.trim();
         childText = getElementContent(child, skipped_element);
@@ -540,6 +587,7 @@ function getElementContent(element, skipped_element = null) {
 function getSelectOptions(element) {
   const options = Array.from(element.options);
   const selectOptions = [];
+
   for (const option of options) {
     selectOptions.push({
       optionIndex: option.index,
@@ -554,82 +602,88 @@ function getListboxOptions(element) {
   var optionElements = element.querySelectorAll('[role="option"]');
   let selectOptions = [];
   for (var i = 0; i < optionElements.length; i++) {
-    var ele = optionElements[i];
+    let ele = optionElements[i];
+
     selectOptions.push({
       optionIndex: i,
-      text: removeMultipleSpaces(ele.textContent),
+      text: removeMultipleSpaces(getVisibleText(ele)),
     });
   }
   return selectOptions;
 }
 
-function buildTreeFromBody() {
+async function getSelect2OptionElements() {
+  let optionList = [];
+
+  while (true) {
+    oldOptionCount = optionList.length;
+    let newOptionList = document.querySelectorAll(
+      "#select2-drop li[role='option']",
+    );
+    if (newOptionList.length === oldOptionCount) {
+      console.log("no more options loaded, wait 5s to query again");
+      // sometimes need more time to load the options, so sleep 10s and try again
+      await sleep(5000); // wait 5s
+      newOptionList = document.querySelectorAll(
+        "#select2-drop li[role='option']",
+      );
+      console.log(newOptionList.length, " options found, after 5s");
+    }
+
+    optionList = newOptionList;
+    if (optionList.length === 0 || optionList.length === oldOptionCount) {
+      break;
+    }
+
+    lastOption = optionList[optionList.length - 1];
+    if (!lastOption.className.toString().includes("select2-more-results")) {
+      break;
+    }
+    lastOption.scrollIntoView();
+  }
+
+  return optionList;
+}
+
+async function getSelect2Options() {
+  const optionList = await getSelect2OptionElements();
+
+  let selectOptions = [];
+  for (let i = 0; i < optionList.length; i++) {
+    let ele = optionList[i];
+    if (ele.className.toString().includes("select2-more-results")) {
+      continue;
+    }
+
+    selectOptions.push({
+      optionIndex: i,
+      text: removeMultipleSpaces(ele.textContent),
+    });
+  }
+
+  return selectOptions;
+}
+
+function uniqueId() {
+  const characters =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  for (let i = 0; i < 4; i++) {
+    const randomIndex = Math.floor(Math.random() * characters.length);
+    result += characters[randomIndex];
+  }
+  return result;
+}
+
+async function buildTreeFromBody(frame = "main.frame", open_select = false) {
   var elements = [];
   var resultArray = [];
 
-  const checkSelect2 = () => {
-    const showInvisible = (element) => {
-      if (element.style.display === "none") {
-        element.style.removeProperty("display");
-        return true;
-      }
-
-      const removedClass = [];
-      for (let i = 0; i < element.classList.length; i++) {
-        const className = element.classList[i];
-        if (className.includes("hidden")) {
-          removedClass.push(className);
-        }
-      }
-      if (removedClass.length !== 0) {
-        removedClass.forEach((className) => {
-          element.classList.remove(className);
-        });
-        return true;
-      }
-      return false;
-    };
-    // according to select2(https://select2.org/getting-started/basic-usage)
-    // select2-container seems to be the most common class in select2,
-    // and the invisible select seems to be the sibling to the "select2-container" element.
-    const selectContainers = document.querySelectorAll(".select2-container");
-
-    selectContainers.forEach((element) => {
-      // search select in previous
-      let _pre = element.previousElementSibling;
-      while (_pre) {
-        if (_pre.tagName.toLowerCase() === "select" && showInvisible(_pre)) {
-          // only hide the select2 container when an alternative select found
-          element.style.display = "none";
-          return;
-        }
-        _pre = _pre.previousElementSibling;
-      }
-
-      // search select in next
-      let _next = element.nextElementSibling;
-      while (_next) {
-        if (_next.tagName.toLowerCase() === "select" && showInvisible(_next)) {
-          // only hide the select2 container when an alternative select found
-          element.style.display = "none";
-          return;
-        }
-        _next = _next.nextElementSibling;
-      }
-    });
-  };
-
-  function buildElementObject(element, interactable) {
-    var element_id = elements.length;
+  async function buildElementObject(element, interactable) {
+    var element_id = element.getAttribute("unique_id") ?? uniqueId();
     var elementTagNameLower = element.tagName.toLowerCase();
     element.setAttribute("unique_id", element_id);
-    // if element is an "a" tag and has a target="_blank" attribute, remove the target attribute
-    // We're doing this so that skyvern can do all the navigation in a single page/tab and not open new tab
-    if (element.tagName.toLowerCase() === "a") {
-      if (element.getAttribute("target") === "_blank") {
-        element.removeAttribute("target");
-      }
-    }
+
     const attrs = {};
     for (const attr of element.attributes) {
       var attrValue = attr.value;
@@ -666,12 +720,16 @@ function buildTreeFromBody() {
 
     let elementObj = {
       id: element_id,
+      frame: frame,
       interactable: interactable,
       tagName: elementTagNameLower,
       attributes: attrs,
       text: getElementContent(element),
       children: [],
       rect: DomUtils.getVisibleClientRect(element, true),
+      // don't trim any attr of this element if keepAllAttr=True
+      keepAllAttr:
+        elementTagNameLower === "svg" || element.closest("svg") !== null,
     };
 
     // get options for select element or for listbox element
@@ -681,7 +739,7 @@ function buildTreeFromBody() {
     } else if (attrs["role"] && attrs["role"].toLowerCase() === "listbox") {
       // if "role" key is inside attrs, then get all the elements with role "option" and get their text
       selectOptions = getListboxOptions(element);
-    } else if (isComboboxDropdown(element)) {
+    } else if (open_select && isComboboxDropdown(element)) {
       // open combobox dropdown to get options
       element.click();
       const listBox = document.getElementById(
@@ -696,6 +754,37 @@ function buildTreeFromBody() {
           keyCode: 9,
           bubbles: true,
           key: "Tab",
+        }),
+      );
+    } else if (open_select && isSelect2Dropdown(element)) {
+      // click element to show options
+      element.dispatchEvent(
+        new MouseEvent("mousedown", {
+          bubbles: true,
+          view: window,
+        }),
+      );
+
+      selectOptions = await getSelect2Options();
+
+      // HACK: click again to close the dropdown
+      element.dispatchEvent(
+        new MouseEvent("mousedown", {
+          bubbles: true,
+          view: window,
+        }),
+      );
+    } else if (open_select && isSelect2MultiChoice(element)) {
+      // click element to show options
+      element.click();
+      selectOptions = await getSelect2Options();
+
+      // HACK: press ESC to close the dropdown
+      element.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          keyCode: 27,
+          bubbles: true,
+          key: "Escape",
         }),
       );
     }
@@ -713,15 +802,23 @@ function buildTreeFromBody() {
       return [];
     }
   }
-  function processElement(element, parentId) {
+  async function processElement(element, parentId) {
     if (element === null) {
       console.log("get a null element");
       return;
     }
 
+    // if element is an "a" tag and has a target="_blank" attribute, remove the target attribute
+    // We're doing this so that skyvern can do all the navigation in a single page/tab and not open new tab
+    if (element.tagName.toLowerCase() === "a") {
+      if (element.getAttribute("target") === "_blank") {
+        element.removeAttribute("target");
+      }
+    }
+
     // Check if the element is interactable
     if (isInteractable(element)) {
-      var elementObj = buildElementObject(element, true);
+      var elementObj = await buildElementObject(element, true);
       elements.push(elementObj);
       // If the element is interactable but has no interactable parent,
       // then it starts a new tree, so add it to the result array
@@ -733,17 +830,27 @@ function buildTreeFromBody() {
       // If the element is interactable and has an interactable parent,
       // then add it to the children of the parent
       else {
-        elements[parentId].children.push(elementObj);
+        // TODO: use dict/object so that we access these in O(1) instead
+        elements
+          .find((element) => element.id === parentId)
+          .children.push(elementObj);
       }
       // options already added to the select.options, no need to add options anymore
       if (elementObj.options && elementObj.options.length > 0) {
         return elementObj;
       }
       // Recursively process the children of the element
-      getChildElements(element).forEach((child) => {
-        processElement(child, elementObj.id);
-      });
+      const children = getChildElements(element);
+      for (let i = 0; i < children.length; i++) {
+        const childElement = children[i];
+        await processElement(childElement, elementObj.id);
+      }
       return elementObj;
+    } else if (element.tagName.toLowerCase() === "iframe") {
+      let iframeElementObject = await buildElementObject(element, false);
+
+      elements.push(iframeElementObject);
+      resultArray.push(iframeElementObject);
     } else {
       // For a non-interactable element, if it has direct text, we also tagged
       // it with unique_id, but with interatable=false in the element.
@@ -755,31 +862,49 @@ function buildTreeFromBody() {
         !isHidden(element) &&
         !isScriptOrStyle(element)
       ) {
-        let textContent = "";
-        for (let i = 0; i < element.childNodes.length; i++) {
-          var node = element.childNodes[i];
-          if (node.nodeType === Node.TEXT_NODE) {
-            textContent += node.textContent.trim();
+        let elementObj = null;
+        let isParentSVG = element.closest("svg");
+        if (element.tagName.toLowerCase() === "svg") {
+          // if element is <svg> we save all attributes and its children
+          elementObj = await buildElementObject(element, false);
+        } else if (isParentSVG && isParentSVG.getAttribute("unique_id")) {
+          // if elemnet is the children of the <svg> with an unique_id
+          elementObj = await buildElementObject(element, false);
+        } else {
+          // character length limit for non-interactable elements should be 5000
+          // we don't use element context in HTML format,
+          // so we need to make sure we parse all text node to avoid missing text in HTML.
+          let textContent = "";
+          for (let i = 0; i < element.childNodes.length; i++) {
+            var node = element.childNodes[i];
+            if (node.nodeType === Node.TEXT_NODE) {
+              textContent += getVisibleText(node).trim();
+            }
+          }
+          if (textContent && textContent.length <= 5000) {
+            elementObj = await buildElementObject(element, false);
           }
         }
 
-        // character length limit for non-interactable elements should be 5000
-        // we don't use element context in HTML format,
-        // so we need to make sure we parse all text node to avoid missing text in HTML.
-        if (textContent && textContent.length <= 5000) {
-          var elementObj = buildElementObject(element, false);
+        if (elementObj !== null) {
           elements.push(elementObj);
           if (parentId === null) {
             resultArray.push(elementObj);
           } else {
-            elements[parentId].children.push(elementObj);
+            // TODO: use dict/object so that we access these in O(1) instead
+            elements
+              .find((element) => element.id === parentId)
+              .children.push(elementObj);
           }
           parentId = elementObj.id;
         }
       }
-      getChildElements(element).forEach((child) => {
-        let children = processElement(child, parentId);
-      });
+
+      const children = getChildElements(element);
+      for (let i = 0; i < children.length; i++) {
+        const childElement = children[i];
+        await processElement(childElement, parentId);
+      }
     }
   }
 
@@ -974,10 +1099,7 @@ function buildTreeFromBody() {
 
   // TODO: Handle iframes
   // setup before parsing the dom
-  checkSelect2();
-  // Clear all the unique_id attributes so that there are no conflicts
-  removeAllUniqueIdAttributes();
-  processElement(document.body, null);
+  await processElement(document.body, null);
 
   for (var element of elements) {
     if (
@@ -1027,14 +1149,6 @@ function drawBoundingBoxes(elements) {
   var groups = groupElementsVisually(elements);
   var hintMarkers = createHintMarkersForGroups(groups);
   addHintMarkersToPage(hintMarkers);
-}
-
-function removeAllUniqueIdAttributes() {
-  var elementsWithUniqueId = document.querySelectorAll("[unique_id]");
-
-  elementsWithUniqueId.forEach(function (element) {
-    element.removeAttribute("unique_id");
-  });
 }
 
 function captchaSolvedCallback() {
@@ -1127,7 +1241,21 @@ function createHintMarkersForGroups(groups) {
   for (let i = 0; i < hintMarkers.length; i++) {
     const hintMarker = hintMarkers[i];
     hintMarker.hintString = hintStrings[i];
-    hintMarker.element.innerHTML = hintMarker.hintString.toUpperCase();
+    try {
+      hintMarker.element.innerHTML = hintMarker.hintString.toUpperCase();
+    } catch (e) {
+      // Ensure trustedTypes is available
+      if (typeof trustedTypes !== "undefined") {
+        const escapeHTMLPolicy = trustedTypes.createPolicy("default", {
+          createHTML: (string) => string,
+        });
+        hintMarker.element.innerHTML = escapeHTMLPolicy.createHTML(
+          hintMarker.hintString.toUpperCase(),
+        );
+      } else {
+        console.error("trustedTypes is not supported in this environment.");
+      }
+    }
   }
 
   return hintMarkers;
@@ -1187,17 +1315,17 @@ function removeBoundingBoxes() {
   }
 }
 
-function scrollToTop(draw_boxes) {
+async function scrollToTop(draw_boxes) {
   removeBoundingBoxes();
   window.scroll({ left: 0, top: 0, behavior: "instant" });
   if (draw_boxes) {
-    var elementsAndResultArray = buildTreeFromBody();
+    var elementsAndResultArray = await buildTreeFromBody();
     drawBoundingBoxes(elementsAndResultArray[0]);
   }
   return window.scrollY;
 }
 
-function scrollToNextPage(draw_boxes) {
+async function scrollToNextPage(draw_boxes) {
   // remove bounding boxes, scroll to next page with 200px overlap, then draw bounding boxes again
   // return true if there is a next page, false otherwise
   removeBoundingBoxes();
@@ -1207,8 +1335,12 @@ function scrollToNextPage(draw_boxes) {
     behavior: "instant",
   });
   if (draw_boxes) {
-    var elementsAndResultArray = buildTreeFromBody();
+    var elementsAndResultArray = await buildTreeFromBody();
     drawBoundingBoxes(elementsAndResultArray[0]);
   }
   return window.scrollY;
+}
+
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
